@@ -1,0 +1,97 @@
+name: Odoo CI/CD
+
+env:
+  IMAGE_NAME: asia-southeast1-docker.pkg.dev/odoo-cicd-6807/odoo-repo/odoo
+  GCP_PROJECT_ID: odoo-cicd-6807
+  GCP_SERVICE_ACCOUNT: odoo-sa@odoo-cicd-6807.iam.gserviceaccount.com
+  GCP_REGION: asia-southeast1
+  CLOUD_RUN_SERVICE_NAME: odoo-app
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:15
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+          PGDATA: /var/lib/postgresql/data/pgdata
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Run Odoo tests
+      run: |
+        docker-compose -f docker-compose.yml run --rm web odoo --test-enable --stop-after-init --workers 0 -d test_db -i my_module
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - id: 'auth'
+      uses: 'google-github-actions/auth@v2'
+      with:
+        workload_identity_provider: 'projects/odoo-cicd-6807/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+        service_account: 'odoo-sa@odoo-cicd-6807.iam.gserviceaccount.com'
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile
+        push: true
+        tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+        labels: sha=${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - id: 'auth'
+      uses: 'google-github-actions/auth@v2'
+      with:
+        workload_identity_provider: 'projects/odoo-cicd-6807/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+        service_account: '${{ env.GCP_SERVICE_ACCOUNT }}'
+
+    - name: Deploy to Cloud Run
+      id: deploy
+      uses: google-github-actions/deploy-cloudrun@v2
+      with:
+        service: ${{ env.CLOUD_RUN_SERVICE_NAME }}
+        region: ${{ env.GCP_REGION }}
+        image: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+    - name: Show Cloud Run URL
+      run: echo "Deployment URL: ${{ steps.deploy.outputs.url }}"
+
